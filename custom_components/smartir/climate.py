@@ -7,19 +7,18 @@ import voluptuous as vol
 
 from homeassistant.components.climate import ClimateEntity, PLATFORM_SCHEMA
 from homeassistant.components.climate.const import (
-    HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL,
-    HVACMode.DRY, HVACMode.FAN_ONLY, HVACMode.AUTO,
-    ClimateEntityFeature.TARGET_TEMPERATURE, ClimateEntityFeature.FAN_MODE,
-    ClimateEntityFeature.SWING_MODE, HVAC_MODES, ATTR_HVAC_MODE)
+    HVACMode, ClimateEntityFeature, HVAC_MODES, ATTR_HVAC_MODE)
 from homeassistant.const import (
     CONF_NAME, STATE_ON, STATE_OFF, STATE_UNKNOWN, STATE_UNAVAILABLE, ATTR_TEMPERATURE,
     PRECISION_TENTHS, PRECISION_HALVES, PRECISION_WHOLE)
-from homeassistant.core import callback
+from homeassistant.core import callback, Event, EventStateChangedData
 from homeassistant.helpers.event import async_track_state_change_event
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.restore_state import RestoreEntity
 from . import COMPONENT_ABS_DIR, Helper
 from .controller import get_controller
+
+from functools import partial
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +36,9 @@ CONF_POWER_SENSOR_RESTORE_STATE = 'power_sensor_restore_state'
 
 SUPPORT_FLAGS = (
     ClimateEntityFeature.TARGET_TEMPERATURE | 
-    ClimateEntityFeature.FAN_MODE
+    ClimateEntityFeature.FAN_MODE |
+    ClimateEntityFeature.TURN_OFF |
+    ClimateEntityFeature.TURN_ON
 )
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
@@ -51,6 +52,20 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_POWER_SENSOR): cv.entity_id,
     vol.Optional(CONF_POWER_SENSOR_RESTORE_STATE, default=False): cv.boolean
 })
+
+def read_json(_device_json_path: str):
+    device_data = {}
+
+    with open(_device_json_path) as j:
+        try:
+            _LOGGER.debug(f"loading json file {_device_json_path}")
+            device_data = json.load(j)
+            _LOGGER.debug(f"{_device_json_path} file loaded")
+        except Exception:
+            _LOGGER.error("The device Json file is invalid")
+            return {}
+
+    return device_data
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     """Set up the IR Climate platform."""
@@ -82,14 +97,9 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
                           "place the file manually in the proper directory.")
             return
 
-    with open(device_json_path) as j:
-        try:
-            _LOGGER.debug(f"loading json file {device_json_path}")
-            device_data = json.load(j)
-            _LOGGER.debug(f"{device_json_path} file loaded")
-        except Exception:
-            _LOGGER.error("The device Json file is invalid")
-            return
+    device_data = await hass.async_add_executor_job(partial(read_json, _device_json_path=device_json_path))
+    if not device_data:
+        return
 
     async_add_entities([SmartIRClimate(
         hass, config, device_data
@@ -385,27 +395,28 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
             except Exception as e:
                 _LOGGER.exception(e)
             
-    async def _async_temp_sensor_changed(self, entity_id, old_state, new_state):
+    async def _async_temp_sensor_changed(self, event: Event[EventStateChangedData]):
         """Handle temperature sensor changes."""
-        if new_state is None:
+        if (new_state := event.data["new_state"]) is None:
             return
 
         self._async_update_temp(new_state)
         self.async_write_ha_state()
 
-    async def _async_humidity_sensor_changed(self, entity_id, old_state, new_state):
+    async def _async_humidity_sensor_changed(self, event: Event[EventStateChangedData]):
         """Handle humidity sensor changes."""
-        if new_state is None:
+        if (new_state := event.data["new_state"]) is None:
             return
 
         self._async_update_humidity(new_state)
         self.async_write_ha_state()
 
-    async def _async_power_sensor_changed(self, entity_id, old_state, new_state):
+    async def _async_power_sensor_changed(self, event: Event[EventStateChangedData]):
         """Handle power sensor changes."""
-        if new_state is None:
+        if (new_state := event.data["new_state"]) is None:
             return
 
+        old_state = event.data["old_state"]
         if old_state is not None and new_state.state == old_state.state:
             return
 
